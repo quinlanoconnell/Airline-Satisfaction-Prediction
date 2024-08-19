@@ -1,0 +1,590 @@
+---
+title: Intro to Machine Learning 
+subtitle: Airline Satisfaction Classification
+author: Michael Crosson, Saaket Joshi, Luke Leon, Quinlan O'Connell, Austin Yeh
+date: 07/26/2024
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ISLR2)
+library(pROC)
+library(glmnet)
+library(tidyverse)
+library(reshape2)
+library(caret)
+library(randomForest)
+library(tree)
+library(rpart)
+library(rpart.plot)
+library(BART)
+library(patchwork)
+library(corrplot)
+library(gbm)
+
+set.seed(120)
+```
+
+# Import Dataset
+```{r}
+trainData <- read_rds("data/airline_encoded_train.rds")
+testData <- read_rds("data/airline_encoded_test.rds")
+
+df <- rbind(trainData, testData)
+```
+
+# Exploratory Data Analysis (EDA)
+```{r}
+df %>% glimpse
+```
+
+## Change DataTypes
+```{r}
+df <- df %>% mutate(
+  Inflight.wifi.service = as.factor(Inflight.wifi.service),
+  Departure.Arrival.time.convenient = as.factor(Departure.Arrival.time.convenient),
+  Ease.of.Online.booking = as.factor(Ease.of.Online.booking),
+  Gate.location = as.factor(Gate.location),
+  Food.and.drink = as.factor(Food.and.drink),
+  Online.boarding = as.factor(Online.boarding),
+  Seat.comfort = as.factor(Seat.comfort),
+  Inflight.entertainment = as.factor(Inflight.entertainment),
+  On.board.service = as.factor(On.board.service),
+  Leg.room.service = as.factor(Leg.room.service),
+  Baggage.handling = as.factor(Baggage.handling),
+  Checkin.service = as.factor(Checkin.service),
+  Inflight.service = as.factor(Inflight.service),
+  Cleanliness = as.factor(Cleanliness)
+)
+```
+
+
+## Summary
+```{r}
+summary(df)
+```
+## Univariate
+
+```{r}
+p1 <- ggplot(df, aes(Age)) + 
+  geom_density(fill="lightblue", color="black", alpha=0.8) +
+  labs(title = "Distribution of Age") + theme_bw()
+
+p2 <- df %>%
+  mutate(satisfaction = recode(satisfaction, `0` = "neutral or dissatisfied", `1` = "satisfied")) %>%
+  ggplot(aes(x = Age, fill = satisfaction)) +
+  geom_density(alpha = 0.5) +
+  labs(x = NULL) +
+  theme_bw() +
+  facet_wrap(~satisfaction)
+
+p1/p2
+```
+
+Most people who booked flights are around 25 years old and 40 years old.
+
+
+```{r}
+p1 <- ggplot(df, aes(Flight.Distance)) + 
+  geom_density(fill = "lightblue", color = "black", alpha = 0.8) +
+  labs(title = "Distribution of Flight Distance") + 
+  theme_bw()
+
+p2 <- df %>%
+  mutate(satisfaction = recode(satisfaction, `0` = "neutral or dissatisfied", `1` = "satisfied")) %>%
+  ggplot(aes(x = Flight.Distance, fill = satisfaction)) +
+  geom_density(alpha = 0.5) +
+  labs(x = NULL, title = "Distribution of Flight Distance by Satisfaction") +
+  theme_bw() +
+  facet_wrap(~ satisfaction)
+
+combined_plot <- p1 / p2
+
+print(combined_plot)
+```
+
+Majority of flights are within 1500 miles
+
+```{r}
+p1 <- ggplot(df, aes(Departure.Delay.in.Minutes)) + 
+  geom_density(fill = "lightblue", color = "black", alpha = 0.8) +
+  labs(title = "Distribution of Departure Delay in Minutes") + 
+  theme_bw()
+
+p2 <- df %>%
+  mutate(satisfaction = recode(satisfaction, `0` = "neutral or dissatisfied", `1` = "satisfied")) %>%
+  ggplot(aes(x = Departure.Delay.in.Minutes, fill = satisfaction)) +
+  geom_density(alpha = 0.5) +
+  labs(x = NULL, title = "Distribution of Departure Delay by Satisfaction") +
+  theme_bw() +
+  facet_wrap(~ satisfaction)
+
+combined_plot <- p1 / p2
+
+print(combined_plot)
+```
+
+
+```{r}
+df %>% 
+  select(8:15) %>%
+  gather(variable, value) %>%
+  ggplot(aes(x = value)) +
+  geom_bar(fill = "salmon") +
+  facet_wrap(~ variable, scales = "free_x") +
+  theme_bw() +
+  labs(title = "Range Variables pt.1")
+
+df %>% 
+  select(16:21) %>%
+  gather(variable, value) %>%
+  ggplot(aes(x = value)) +
+  geom_bar(fill = "salmon") +
+  facet_wrap(~ variable, scales = "free_x") +
+  theme_bw() +
+  labs(title = "Range Variables pt.2")
+
+```
+
+
+
+
+## Correlation Matrix (pt.1)
+
+[Reference to the correlation matrix code](https://towardsdatascience.com/how-to-create-a-correlation-matrix-with-too-many-variables-309cc0c0a57#:~:text=With%20more%20variables%2C%20it%20may,results%20are%20readable%20and%20useful.)
+
+```{r}
+corr_simple <- function(data=df,sig=0.45){
+  #convert data to numeric in order to run correlations
+  #convert to factor first to keep the integrity of the data - each value will become a number rather than turn into NA
+  df_cor <- data %>% mutate_if(is.character, as.factor)
+  df_cor <- df_cor %>% mutate_if(is.factor, as.numeric)
+  #run a correlation and drop the insignificant ones
+  corr <- cor(df_cor)
+  #prepare to drop duplicates and correlations of 1     
+  corr[lower.tri(corr,diag=TRUE)] <- NA 
+  #drop perfect correlations
+  corr[corr == 1] <- NA 
+  #turn into a 3-column table
+  corr <- as.data.frame(as.table(corr))
+  #remove the NA values from above 
+  corr <- na.omit(corr) 
+  #select significant values  
+  corr <- subset(corr, abs(Freq) > sig) 
+  #sort by highest correlation
+  corr <- corr[order(-abs(corr$Freq)),] 
+  #print table
+  print(corr)
+  #turn corr back into matrix in order to plot with corrplot
+  mtx_corr <- reshape2::acast(corr, Var1~Var2, value.var="Freq")
+  #plot correlations visually
+  corrplot(mtx_corr, is.corr=FALSE, tl.col="black", na.label=" ", tl.srt=45, cl.ratio = 0.2)
+}
+corr_simple(data = df %>% select(-GenderMale, -Loyal.Customer, -Business.Travel, -ClassBusiness, -ClassEco.Plus), sig=.45)
+```
+
+## Multivariate between Predictors
+
+```{r}
+ggplot(df, aes(x = Ease.of.Online.booking, y = Inflight.wifi.service)) +
+  geom_bin2d() +
+  scale_fill_gradient(low = "white", high = "blue")
+```
+```{r}
+ggplot(df, aes(x = Inflight.entertainment, y = Cleanliness)) +
+  geom_bin2d() +
+  scale_fill_gradient(low = "white", high = "blue")
+```
+
+```{r}
+viz_df <- df %>%
+  mutate(distance_bin = cut(Flight.Distance, breaks = 70, labels = FALSE),
+         Seat.comfort = as.numeric(Seat.comfort))
+
+summary_df <- viz_df %>%
+  group_by(distance_bin) %>%
+  summarise(
+    mean_seat_comfort = mean(Seat.comfort),
+    bin_center = mean(Flight.Distance)
+  )
+
+ggplot(summary_df, aes(x = bin_center, y = mean_seat_comfort)) +
+  geom_line() +
+  geom_smooth() +
+  labs(
+    title = "Flight Distance vs Seat Comfort",
+    x = "Flight Distance (binned)",
+    y = "Mean Seat Comfort"
+  )
+```
+
+
+```{r}
+viz_df <- df %>%
+  mutate(distance_bin = cut(Flight.Distance, breaks = 70, labels = FALSE),
+         On.board.service = as.numeric(On.board.service))
+
+summary_df <- viz_df %>%
+  group_by(distance_bin) %>%
+  summarise(
+    mean_onboard_service = mean(On.board.service),
+    bin_center = mean(Flight.Distance)
+  )
+
+ggplot(summary_df, aes(x = bin_center, y = mean_onboard_service)) +
+  geom_line() +
+  geom_smooth() +
+  labs(
+    title = "Flight Distance vs Onboard Service",
+    x = "Flight Distance (binned)",
+    y = "Mean Onboard Service"
+  )
+```
+
+
+```{r}
+viz_df <- df %>%
+  mutate(age_bin = cut(Age, breaks = 70, labels = FALSE),
+         On.board.service = as.numeric(On.board.service))
+
+summary_df <- viz_df %>%
+  group_by(age_bin) %>%
+  summarise(
+    mean_onboard_service = mean(On.board.service),
+    bin_center = mean(Age)
+  )
+
+ggplot(summary_df, aes(x = bin_center, y = mean_onboard_service)) +
+  geom_line() +
+  geom_smooth() +
+  labs(
+    title = "Age vs Onboard Service",
+    x = "Age (binned)",
+    y = "Onboard Service"
+  )
+```
+
+```{r}
+viz_df <- df %>%
+  mutate(age_bin = cut(Age, breaks = 50, labels = FALSE),
+         Baggage.handling = as.numeric(Baggage.handling))
+
+summary_df <- viz_df %>%
+  group_by(age_bin) %>%
+  summarise(
+    mean_bag_hand = mean(Baggage.handling),
+    bin_center = mean(Age)
+  )
+
+ggplot(summary_df, aes(x = bin_center, y = mean_bag_hand)) +
+  geom_line() +
+  geom_smooth() +
+  labs(
+    title = "Age vs Baggage Handling",
+    x = "Age (binned)",
+    y = "Mean Baggage Handling"
+  )
+```
+
+
+```{r}
+viz_df <- df %>%
+  mutate(age_bin = cut(Age, breaks = 70, labels = FALSE),
+         Ease.of.Online.booking = as.numeric(Ease.of.Online.booking))
+
+summary_df <- viz_df %>%
+  group_by(age_bin) %>%
+  summarise(
+    mean_ease = mean(Ease.of.Online.booking),
+    bin_center = mean(Age)
+  )
+
+ggplot(summary_df, aes(x = bin_center, y = mean_ease)) +
+  geom_line() +
+  geom_smooth() +
+  labs(
+    title = "Age vs Ease of Online Booking",
+    x = "Age (binned)",
+    y = "Mean Ease of Online Booking"
+  )
+```
+
+
+
+
+# Models
+
+## Setup
+```{r}
+conf_mats <- c()
+```
+
+
+## K-Nearest-Neighbors Classification
+```{r}
+# Define the train control with 10-fold cross-validation
+train_control <- trainControl(method = "cv", number = 10)
+
+set.seed(120)
+knn_model <- train(
+  satisfaction ~ ., data = trainData,
+  method = "knn",
+  trControl = train_control,
+  metric = "Accuracy",
+  tuneLength = 5
+)
+```
+
+### ROC
+```{r}
+predictions <- predict(knn_model, newdata = testData, type = "prob")[,2]
+predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+
+# Create ROC curve
+roc_curve <- roc(testData$satisfaction, predictions)
+plot(roc_curve, main = "ROC Curve for KNN Model")
+
+# Calculate and display AUC
+auc_value <- auc(roc_curve)
+text(0.6, 0.2, paste("AUC =", round(auc_value, 4)), col = "blue")
+```
+
+### Confusion Matrix
+```{r}
+conf_matrix <- confusionMatrix(as.factor(predicted_classes), as.factor(testData$satisfaction))
+conf_mats <- c(conf_mats, c("knn_model" = conf_matrix$overall['Accuracy']))
+conf_matrix
+```
+
+
+## Logistic Regression w/ Lasso
+
+```{r}
+set.seed(120)
+# Train the LASSO logistic regression model
+lasso_model <- train(satisfaction ~ ., 
+                     data = trainData, 
+                     method = "glmnet", 
+                     family = "binomial", 
+                     trControl = train_control,
+                     tuneLength = 10)
+```
+
+### Tune Parameters
+```{r}
+# Display the best model
+lasso_model$bestTune
+```
+
+### ROC
+```{r}
+predictions <- predict(lasso_model, newdata = testData, type = "prob")[,2]
+predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+
+roc_curve <- roc(testData$satisfaction, predictions)
+plot(roc_curve, main="ROC Curve for LASSO Logistic Regression Model")
+
+auc <- auc(roc_curve)
+text(0.6, 0.2, paste("AUC =", round(auc, 4)), col = "blue")
+```
+
+### Confusion Matrix
+```{r}
+conf_matrix <- confusionMatrix(as.factor(predicted_classes), as.factor(testData$satisfaction))
+conf_mats <- c(conf_mats, c("lasso_model" = conf_matrix$overall['Accuracy']))
+conf_matrix
+```
+
+
+
+
+## Regular Decision Tree
+
+```{r}
+set.seed(120)
+tree_model <- rpart(satisfaction ~ ., data = trainData, method = "class")
+```
+
+### Tree Model
+```{r}
+rpart.plot(tree_model, type = 3, extra = 102, fallen.leaves = TRUE, 
+           main = "Decision Tree for Satisfaction", 
+           box.palette = "gray", shadow.col = "gray", nn = TRUE)
+```
+
+### ROC
+```{r}
+predictions <- predict(tree_model, newdata = testData, type = "prob")[,2]
+predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+
+# Create ROC curve
+roc_curve <- roc(testData$satisfaction, predictions)
+plot(roc_curve, main = "ROC Curve for Single Tree Model")
+
+# Calculate and display AUC
+auc_value <- auc(roc_curve)
+text(0.6, 0.2, paste("AUC =", round(auc_value, 4)), col = "blue")
+```
+
+### Confusion Matrix
+```{r}
+conf_matrix <- confusionMatrix(as.factor(predicted_classes), as.factor(testData$satisfaction))
+conf_mats <- c(conf_mats, c("tree_model" = conf_matrix$overall['Accuracy']))
+conf_matrix
+```
+
+## Bagging 
+```{r}
+set.seed(120)
+bag_fit <- train(satisfaction ~., data = trainData, 
+                 method = "treebag",
+                 trControl = train_control)
+```
+
+### ROC
+```{r}
+predictions <- predict(bag_fit, newdata = testData, type = "prob")[,2]
+predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+
+# Create ROC curve
+roc_curve <- roc(testData$satisfaction, predictions)
+plot(roc_curve, main = "ROC Curve for Bagging Model")
+
+# Calculate and display AUC
+auc_value <- auc(roc_curve)
+text(0.6, 0.2, paste("AUC =", round(auc_value, 4)), col = "blue")
+```
+
+### Confusion Matrix
+```{r}
+conf_matrix <- confusionMatrix(as.factor(predicted_classes), as.factor(testData$satisfaction))
+conf_mats <- c(conf_mats, c("bag_fit" = conf_matrix$overall['Accuracy']))
+conf_matrix
+```
+
+## Boosting
+```{r include=FALSE}
+trainData$satisfaction <- as.numeric(trainData$satisfaction) - 1
+testData$satisfaction <- as.numeric(testData$satisfaction) - 1
+```
+
+
+```{r}
+set.seed(120)
+# Train the Gradient Boosting Model
+gbmfit <- gbm(satisfaction ~ ., 
+              data = trainData, 
+              distribution = "bernoulli",
+              cv.folds = 10)
+```
+
+### ROC
+```{r}
+predictions <- predict(gbmfit, newdata = testData, type = "response")
+predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+
+# Create ROC curve
+roc_curve <- roc(testData$satisfaction, predictions)
+plot(roc_curve, main = "ROC Curve for Boosting Model")
+
+# Calculate and display AUC
+auc_value <- auc(roc_curve)
+text(0.6, 0.2, paste("AUC =", round(auc_value, 4)), col = "blue")
+```
+
+
+
+### Confusion Matrix
+```{r}
+conf_matrix <- confusionMatrix(as.factor(predicted_classes), as.factor(testData$satisfaction))
+conf_mats <- c(conf_mats, c("gbmfit" = conf_matrix$overall['Accuracy']))
+conf_matrix
+```
+
+```{r include=FALSE}
+trainData$satisfaction <- as.factor(trainData$satisfaction)
+testData$satisfaction <- as.factor(testData$satisfaction)
+```
+
+
+## BART
+```{r}
+trainData[,c("GenderMale", "Loyal.Customer", "Business.Travel", "ClassBusiness", "ClassEco.Plus", "satisfaction")] <- trainData[,c("GenderMale", "Loyal.Customer", "Business.Travel", "ClassBusiness", "ClassEco.Plus", "satisfaction")] %>% sapply(as.numeric) - 1
+
+trainData[,c("GenderMale", "Loyal.Customer", "Business.Travel", "ClassBusiness", "ClassEco.Plus", "satisfaction")] <- trainData[,c("GenderMale", "Loyal.Customer", "Business.Travel", "ClassBusiness", "ClassEco.Plus", "satisfaction")] %>% sapply(as.logical)
+
+testData[,c("GenderMale", "Loyal.Customer", "Business.Travel", "ClassBusiness", "ClassEco.Plus", "satisfaction")] <- testData[,c("GenderMale", "Loyal.Customer", "Business.Travel", "ClassBusiness", "ClassEco.Plus", "satisfaction")] %>% sapply(as.numeric) - 1
+
+testData[,c("GenderMale", "Loyal.Customer", "Business.Travel", "ClassBusiness", "ClassEco.Plus", "satisfaction")] <- testData[,c("GenderMale", "Loyal.Customer", "Business.Travel", "ClassBusiness", "ClassEco.Plus", "satisfaction")] %>% sapply(as.logical)
+```
+
+
+```{r}
+xtrain <- trainData %>% select(-satisfaction) %>% as.data.frame()
+ytrain <- trainData$satisfaction
+
+xtest <- testData %>% select(-satisfaction) %>% as.data.frame()
+ytest <- testData$satisfaction
+
+set.seed(120)
+bart_model <- lbart(xtrain, ytrain, x.test = xtest, ntree = 50, ndpost = 1000, nskip = 100)
+```
+
+### ROC
+```{r}
+predictions <- bart_model$prob.test.mean
+predicted_classes <- ifelse(predictions > 0.5, 1, 0)
+
+# Create ROC curve
+roc_curve <- roc(testData$satisfaction, predictions)
+plot(roc_curve, main = "ROC Curve for BART Model")
+
+# Calculate and display AUC
+auc_value <- auc(roc_curve)
+text(0.6, 0.2, paste("AUC =", round(auc_value, 4)), col = "blue")
+```
+
+### Confusion Matrix
+```{r}
+test <- factor(testData$satisfaction, levels = c(FALSE, TRUE))
+levels(test) <- c(0, 1)
+
+conf_matrix <- confusionMatrix(as.factor(predicted_classes), test)
+conf_mats <- c(conf_mats, c("bart_model" = conf_matrix$overall['Accuracy']))
+conf_matrix
+```
+
+
+# Model Comparison
+```{r}
+accuracy_df <- 
+  data.frame(conf_mats, 
+             Model = names(conf_mats), 
+             Accuracy = as.numeric(conf_mats)) %>% 
+  select(-conf_mats) %>% 
+  mutate(Model = gsub("\\.Accuracy", "", Model)) %>% 
+  mutate(Model = reorder(Model, -Accuracy))
+
+rownames(accuracy_df) <- NULL
+
+accuracy_df
+```
+
+```{r}
+
+ggplot(accuracy_df, aes(x = Model, y = Accuracy)) +
+     geom_bar(stat = "identity", fill = "steelblue") +
+     geom_text(aes(label = sprintf("%.2f%%", Accuracy * 100)), vjust = -0.3) +
+     labs(
+         title = "Model Accuracy Comparison",
+         x = "Model",
+         y = "Accuracy"
+     ) +
+     theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+
+
